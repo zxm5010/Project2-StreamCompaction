@@ -9,6 +9,5 @@
 void GPU_naive_prefix_sum(float * in, float * out, int n);
 void GPU_single_shared_prefix_sum(float * in, float * out, int n);
 void GPU_shared_prefix_sum(float * in, float * out, int n);
-void GPU_scatter(float * in, float * out, int n);
-
+void GPU_stream_compact(float * in, float * out, int n);
 #endif

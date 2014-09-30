@@ -4,7 +4,7 @@
 #include <math.h>
 #include "StreamCompaction.h"
 
-
+using namespace std;
 // part 2: naive prefix sum
 __global__ void writeBuffer(float * in, float * out, int n)
 {
@@ -93,13 +93,38 @@ __global__ void shared_sum( float * in,  float * out, int n, float * sum)
 		sum[blockIdx.x] = tmp[BlockSize - 1];
 }
 
-__global__ void add_sum(float * in, float * out, int n, float * sum)
+__global__ void add_sum( float * out, int n, float * sum)
 {
 	int index = blockIdx.x * blockDim.x + threadIdx.x;
-	if(index < n)
+	if(index < n && blockIdx.x > 0)
 		out[index] += sum[blockIdx.x];
 }
 
+// part 4: scatter and stream compact
+__global__ void generateBoolArray(float * in, float * out, int n)
+{
+	int index = blockIdx.x * blockDim.x + threadIdx.x;
+	if(index < n)
+	{
+		if(in[index] > 0)
+			out[index] = 1;
+		else
+			out[index] = 0;
+	}
+}
+
+__global__ void scatter(float * in, float * indexArray, float * out, int n)
+{
+	int index = blockIdx.x * blockDim.x + threadIdx.x;
+	if(index < n)
+	{	
+		if(in[index] > 0)
+		{
+			int tmp = indexArray[index];
+			out[tmp] = in[index];
+		}
+	}
+}
 
 
 // wrapper fuctions
@@ -114,12 +139,27 @@ void GPU_naive_prefix_sum(float * in, float * out, int n)
 	cudaMemcpy(dev_in, in, n * sizeof(float), cudaMemcpyHostToDevice);
 	dim3 fullBlocksPerGrid((int)ceil(float(n)/float(BlockSize)));
 
+	cudaEvent_t start, stop;
+	float time;
+
+	cudaEventCreate(&start);
+	cudaEventCreate(&stop);
+	cudaEventRecord( start, 0 );
+
 	for(int i = 1; i < n ; i *= 2)
 	{
 		writeBuffer<<<fullBlocksPerGrid, BlockSize, BlockSize * sizeof(float)>>>(dev_in, dev_out, n);
 		naive_sum<<<fullBlocksPerGrid, BlockSize, BlockSize * sizeof(float)>>>(dev_in, dev_out, i, n);
 	}
 	writeOutput<<<fullBlocksPerGrid, BlockSize, BlockSize * sizeof(float)>>>(dev_in, dev_out, n);
+
+
+	cudaEventRecord( stop, 0 ); 
+	cudaEventSynchronize( stop ); 
+	cudaEventElapsedTime( &time, start, stop ); 
+	cudaEventDestroy( start ); 
+	cudaEventDestroy( stop );
+	cout << "#GPU naive prefix sum performance:  "<< time << " ms" << endl;
 
 	cudaMemcpy(out, dev_out, n * sizeof(float), cudaMemcpyDeviceToHost);
 	out[0] = 0;
@@ -170,9 +210,23 @@ void GPU_shared_prefix_sum(float * in, float * out, int n)
 	cudaMemcpy(dev_in, in, n * sizeof(float), cudaMemcpyHostToDevice);
 	dim3 fullBlocksPerGrid(grid_size);
 
+	cudaEvent_t start, stop;
+	float time;
+
+	cudaEventCreate(&start);
+	cudaEventCreate(&stop);
+	cudaEventRecord( start, 0 );
+
 	shared_sum<<<fullBlocksPerGrid, BlockSize, BlockSize * sizeof(float)>>>(dev_in, dev_out, n, dev_sum);
 	scan_sum(dev_sum, dev_sum, grid_size);
-	add_sum<<<fullBlocksPerGrid, BlockSize, BlockSize * sizeof(float)>>>(dev_in,dev_out,n,dev_sum);
+	add_sum<<<fullBlocksPerGrid, BlockSize, BlockSize * sizeof(float)>>>(dev_out,n,dev_sum);
+
+	cudaEventRecord( stop, 0 ); 
+	cudaEventSynchronize( stop ); 
+	cudaEventElapsedTime( &time, start, stop ); 
+	cudaEventDestroy( start ); 
+	cudaEventDestroy( stop );
+	cout << "#GPU shared prefix sum performance:  "<< time << " ms" << endl;
 
 	cudaMemcpy(out, dev_out, n * sizeof(float), cudaMemcpyDeviceToHost);
 	out[0] = 0;
@@ -182,8 +236,49 @@ void GPU_shared_prefix_sum(float * in, float * out, int n)
 	cudaFree(dev_sum);
 }
 
-void GPU_scatter(float * in, float * out, int n)
+void GPU_stream_compact(float * in, float * out, int n)
 {
+	float * dev_in;
+	float * dev_out;
+	float * dev_boolArray;
+	float * dev_sum;
+	int grid_size = (int)ceil(float(n)/float(BlockSize));
 
+	cudaMalloc((void**)&dev_in, n*(sizeof(float)));
+	cudaMalloc((void**)&dev_out, n*(sizeof(float)));
+	cudaMalloc((void**)&dev_boolArray, n*(sizeof(float)));
+	cudaMalloc((void**)&dev_sum, grid_size * (sizeof(float)));
+	cudaMemcpy(dev_in, in, n * sizeof(float), cudaMemcpyHostToDevice);
+	dim3 fullBlocksPerGrid(grid_size);
+
+	cudaEvent_t start, stop;
+	float time;
+
+	cudaEventCreate(&start);
+	cudaEventCreate(&stop);
+	cudaEventRecord( start, 0 );
+
+	generateBoolArray<<<fullBlocksPerGrid, BlockSize, BlockSize * sizeof(float)>>>(dev_in, dev_boolArray, n);
+
+	shared_sum<<<fullBlocksPerGrid, BlockSize, BlockSize * sizeof(float)>>>(dev_boolArray, dev_boolArray, n, dev_sum);
+	scan_sum(dev_sum, dev_sum, grid_size);
+	add_sum<<<fullBlocksPerGrid, BlockSize, BlockSize * sizeof(float)>>>(dev_boolArray,n,dev_sum);
+
+	scatter<<<fullBlocksPerGrid, BlockSize, BlockSize * sizeof(float)>>>(dev_in, dev_boolArray, dev_out, n);
+
+
+	cudaEventRecord( stop, 0 ); 
+	cudaEventSynchronize( stop ); 
+	cudaEventElapsedTime( &time, start, stop ); 
+	cudaEventDestroy( start ); 
+	cudaEventDestroy( stop );
+	cout << "#GPU stream compact performance:  "<< time << " ms" << endl;
+
+	cudaMemcpy(out, dev_out, n * sizeof(float), cudaMemcpyDeviceToHost);
+
+	cudaFree(dev_in);
+	cudaFree(dev_out);
+	cudaFree(dev_sum);
+	cudaFree(dev_boolArray);
 }
 
